@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>时间-收入效用拟合器</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            max-width: 700px;
+            margin: 30px auto;
+            padding: 20px;
+            background: #fafafa;
+            color: #333;
+        }
+
+        h1 {
+            text-align: center;
+        }
+
+        .point {
+            margin-bottom: 12px;
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+
+        input {
+            width: 120px;
+            padding: 6px;
+        }
+
+        button {
+            padding: 8px 16px;
+            margin-top: 10px;
+            background: #007bff;
+            color: white;
+            border: none;
+            cursor: pointer;
+        }
+
+        button:hover {
+            opacity: 0.9;
+        }
+
+        .result,
+        .explanation {
+            margin-top: 20px;
+            padding: 15px;
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 1px 4px rgba(0, 0, 0, 0.1);
+        }
+
+        .explanation {
+            background: #f0f8ff;
+        }
+
+        label {
+            display: inline-block;
+            width: 100px;
+        }
+    </style>
+</head>
+
+<body>
+    <h1>💰⏱️ 收入-时间效用拟合器 </h1>
+    <p>输入3个你认为“效用相同”的（可自由支配收入, 可自由支配时间）点，拟合你的个人偏好。</p>
+
+    <div id="points"></div>
+
+    <button onclick="fit()">拟合我的偏好</button>
+
+    <div id="result" class="result" style="display:none;"></div>
+    <div id="explanation" class="explanation" style="display:none;"></div>
+
+    <h3>等效补偿计算器</h3>
+    <p>基于你的偏好，计算维持相同效用所需的补偿：</p>
+    <div>
+        <label>新收入（万元/年）：</label>
+        <input type="number" id="newIncome" value="50" placeholder="新收入（计算所需时间）">
+        <button onclick="calcByIncome()">计算所需时间</button>
+    </div>
+    <div style="margin-top:10px;">
+        <label>新时间（小时/周）：</label>
+        <input type="number" id="newTime" value="24" placeholder="新时间（计算所需收入）">
+        <button onclick="calcByTime()">计算所需收入</button>
+    </div>
+    <div id="compensation" class="result" style="display:none; margin-top:15px;"></div>
+
+    <script>
+        // 默认3个点（可自由支配收入，可自由支配时间）
+        const defaultPoints = [
+            [25, 48],
+            [20, 53],
+            [35, 43],
+        ];
+
+        function init() {
+            const container = document.getElementById('points');
+            container.innerHTML = '';
+            defaultPoints.forEach((pt, i) => {
+                const div = document.createElement('div');
+                div.className = 'point';
+                div.innerHTML = `
+          <strong>点 ${i + 1}：</strong>
+          <input type="number" class="income" value="${pt[0]}" step="1"> 万元/年，
+          <input type="number" class="time" value="${pt[1]}" step="1"> 小时/周
+        `;
+                container.appendChild(div);
+            });
+        }
+
+        function getPoints() {
+            const inputs = document.querySelectorAll('.point');
+            const pts = [];
+            for (const div of inputs) {
+                const inc = parseFloat(div.querySelector('.income').value);
+                const tim = parseFloat(div.querySelector('.time').value);
+                if (isNaN(inc) || isNaN(tim)) continue;
+                pts.push([inc, tim]);
+            }
+            return pts;
+        }
+
+        function cesUtility(I, T, a, rho) {
+            if (Math.abs(rho) < 1e-6) {
+                return Math.pow(I, a) * Math.pow(T, 1 - a);
+            }
+            const val = a * Math.pow(I, rho) + (1 - a) * Math.pow(T, rho);
+            return val > 0 ? Math.pow(val, 1 / rho) : NaN;
+        }
+
+        function checkI(I) {
+            if (isNaN(I) || I < 0) {
+                return "可自由支配收入应为非负值";
+            }
+            return null;
+        }
+
+        function checkT(T) {
+            if (isNaN(T) || T < 0 || T > 168) {
+                return "可自由支配时间应在0到168小时/周之间";
+            }
+            return null;
+        }
+
+        // 检查点集的一致性
+        function checkConsistency(points) {
+            if (points.length < 3) return null;
+
+            // 检查是否违背单调性
+            // 最好指出哪两个点违背单调性
+            for (let i = 0; i < points.length; i++) {
+                const [I1, T1] = points[i];
+                for (let j = 0; j < points.length; j++) {
+                    if (i === j) continue;
+                    const [I2, T2] = points[j];
+                    if (I1 >= I2 && T1 >= T2) {
+                        return `不一致：点 ${i + 1}（${I1} 万元/年, ${T1} 小时/周）优于点 ${j + 1}（${I2} 万元/年, ${T2} 小时/周），但你认为它们效用相同。`;
+                    }
+                }
+            }
+
+            for (const [I, T] of points) {
+                const errI = checkI(I);
+                if (errI) return errI;
+                const errT = checkT(T);
+                if (errT) return errT;
+            }
+
+            return null;
+        }
+
+        function fitCES(points) {
+            const [I0, T0] = points[0];
+            let bestErr = Infinity;
+            let bestA = 0.5, bestRho = 0;
+            // 网格搜索
+            for (let a = 0.0; a <= 1.0; a += 0.002) {
+                for (let rho = -4.0; rho <= 0.9; rho += 0.01) {
+                    try {
+                        const U0 = cesUtility(I0, T0, a, rho);
+                        let err = 0;
+                        for (let i = 1; i < points.length; i++) {
+                            const [I, T] = points[i];
+                            const Ui = cesUtility(I, T, a, rho);
+                            err += Math.pow(Math.log(Ui) - Math.log(U0), 2);
+                        }
+                        if (err < bestErr) {
+                            bestErr = err;
+                            bestA = a;
+                            bestRho = rho;
+                        }
+                    } catch (e) { /* skip */ }
+                }
+            }
+
+            return { a: bestA, rho: bestRho };
+        }
+
+        function solveForT(I_new, I0, T0, a, rho) {
+            const U0 = cesUtility(I0, T0, a, rho);
+            if (Math.abs(rho) < 1e-6) {
+                return Math.pow(U0 / Math.pow(I_new, a), 1 / (1 - a));
+            }
+            const target = Math.pow(U0, rho);
+            const termI = a * Math.pow(I_new, rho);
+            if (termI >= target) return NaN;
+            const T_rho = (target - termI) / (1 - a);
+            return T_rho > 0 ? Math.pow(T_rho, 1 / rho) : NaN;
+        }
+
+        function solveForI(T_new, I0, T0, a, rho) {
+            const U0 = cesUtility(I0, T0, a, rho);
+            if (Math.abs(rho) < 1e-6) {
+                return Math.pow(U0 / Math.pow(T_new, 1 - a), 1 / a);
+            }
+            const target = Math.pow(U0, rho);
+            const termT = (1 - a) * Math.pow(T_new, rho);
+            if (termT >= target) return NaN;
+            const I_rho = (target - termT) / a;
+            return I_rho > 0 ? Math.pow(I_rho, 1 / rho) : NaN;
+        }
+
+        let fittedParams = null;
+
+        function fit() {
+            const pts = getPoints();
+            if (pts.length < 3) {
+                alert("请至少输入3个有效点！");
+                return;
+            }
+
+            const inconsistency_str = checkConsistency(pts);
+            if (inconsistency_str) {
+                alert("数据问题：\n" + inconsistency_str + "\n\n请调整你的输入点。");
+                return;
+            }
+
+            fittedParams = fitCES(pts);
+            const { a, rho } = fittedParams;
+            const sigma = 1 / (1 - rho);
+
+            document.getElementById('result').style.display = 'block';
+            document.getElementById('result').innerHTML = `
+        <strong>拟合结果：</strong><br>
+        • 收入权重 a = ${(a * 100).toFixed(1)}%，时间权重 1 - a = ${((1 - a) * 100).toFixed(1)}%<br>
+        • 曲率 ρ = ${rho.toFixed(2)}<br>
+        • 替代弹性 σ = ${sigma.toFixed(2)}<br>
+      `;
+
+            let interp = "";
+            if (rho > -0.2 && rho < 0.2) {
+                interp = "你的偏好接近 Cobb-Douglas：你倾向于按固定比例交换时间和收入（例如收入翻倍，愿意接受时间减半）。";
+            } else if (rho < 0) {
+                interp = "ρ < 0, σ < 1 表示时间和收入是<strong>互补品</strong>：当你时间很少时，你极度不愿意再牺牲时间；收入很低时，你也极度不愿意再降薪。";
+            } else {
+                interp = "ρ > 0, σ > 1 表示时间和收入是<strong>替代品</strong>：你很容易用收入换时间（或反之），比如愿意为高薪大幅加班。";
+            }
+
+            document.getElementById('explanation').style.display = 'block';
+            document.getElementById('explanation').innerHTML = `<strong>直观解释：</strong><br>${interp}`;
+        }
+
+        function calcByIncome() {
+            if (!fittedParams) { alert("请先拟合偏好！"); return; }
+            const I_new = parseFloat(document.getElementById('newIncome').value);
+            const errI = checkI(I_new);
+            if (errI) {
+                alert("输入错误：\n" + errI);
+                return;
+            }
+
+            const [I0, T0] = getPoints()[0];
+            const T_new = solveForT(I_new, I0, T0, fittedParams.a, fittedParams.rho);
+            if (checkT(T_new)) {
+                document.getElementById('compensation').textContent = "无法补偿（收入过低）";
+            } else {
+                document.getElementById('compensation').textContent =
+                    `若年收入为 ${I_new} 万元，则需要约 ${T_new.toFixed(1)} 小时/周的自由时间才能保持相同效用。`;
+            }
+            document.getElementById('compensation').style.display = 'block';
+        }
+
+        function calcByTime() {
+            if (!fittedParams) { alert("请先拟合偏好！"); return; }
+            const T_new = parseFloat(document.getElementById('newTime').value);
+            if (checkT(T_new)) {
+                alert("输入错误：\n" + checkT(T_new));
+                return;
+            }
+            const [I0, T0] = getPoints()[0];
+            const I_new = solveForI(T_new, I0, T0, fittedParams.a, fittedParams.rho);
+            if (checkI(I_new)) {
+                document.getElementById('compensation').textContent = "无法补偿（时间过低）";
+            } else {
+                document.getElementById('compensation').textContent =
+                    `若每周自由时间为 ${T_new} 小时，则需要约 ${I_new.toFixed(1)} 万元/年的收入才能保持相同效用。`;
+            }
+            document.getElementById('compensation').style.display = 'block';
+        }
+
+        // 初始化
+        init();
+    </script>
+</body>
+
+</html>
